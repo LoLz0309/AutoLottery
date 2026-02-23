@@ -156,51 +156,128 @@ def run(playwright: Playwright, auto_games: int, manual_numbers: list, sr: Scrip
         # 3. Selection Flow
         sr.stage("SELECT_NUMBERS")
         
+        def get_actual_cart_count():
+            # Any visible .myNum-box represents an added game (Auto or Manual)
+            return page.locator(".myNum-box:visible").count()
+
         # Automatic games
         if auto_games > 0:
             print(f"Adding automatic game(s): {auto_games}")
-            # On mobile, clicking '자동 1매 추가' adds one game to the list
             auto_btn = page.locator("button:has-text('자동 1매 추가')")
             for i in range(auto_games):
+                current_count = get_actual_cart_count()
+                if current_count >= 5:
+                    print("Cart is full (5 games max)")
+                    break
+                
                 try:
-                    # Ensure button is visible/ready
                     if auto_btn.is_visible(timeout=3000):
                         auto_btn.click()
-                        time.sleep(0.5)
+                        # Wait for count to increase
+                        success = False
+                        for _ in range(10):
+                            time.sleep(0.3)
+                            if get_actual_cart_count() > current_count:
+                                success = True
+                                break
+                        if not success:
+                            print(f"Failed to add auto game {i+1} (count didn't increase)")
                     else:
                         print(f"Auto button not visible for game {i+1}")
                         break
                 except Exception as e:
-                    print(f"Failed to click auto button: {e}")
+                    print(f"Error adding auto game: {e}")
                     break
 
         # Manual numbers
         if manual_numbers and len(manual_numbers) > 0:
             for numbers in manual_numbers:
+                if get_actual_cart_count() >= 5:
+                    print("Cart is full (5 games max)")
+                    break
+                    
                 print(f"Adding manual game: {numbers}")
+                # Click '번호 선택하기' to open the popup board
+                open_btn = page.locator("button:has-text('번호 선택하기')").first
+                if open_btn.is_visible(timeout=3000):
+                    open_btn.click()
+                    time.sleep(0.8)
+
+                # Reset previous selection to ensure clean state (especially for identical games)
+                reset_btn = page.locator("#btnInit, button:has-text('초기화')").first
+                if reset_btn.is_visible(timeout=2000):
+                    reset_btn.click()
+                    time.sleep(0.5)
+
                 # Select each number
                 for number in numbers:
-                    num_el = page.locator(f".lt-num:has-text('{number}')").first
+                    num_el = page.locator(f"xpath=//div[contains(@class, 'lt-num') and text()='{number}']").first
                     if num_el.is_visible(timeout=2000):
                         num_el.click()
+                        time.sleep(0.05)
                     else:
                         print(f"Number {number} not found on board")
                 
                 # Click '선택완료' to add to list
                 select_done = page.locator("#btnSelectNum, button:has-text('선택완료')").first
                 if select_done.is_visible(timeout=2000):
+                    current_count = get_actual_cart_count()
                     select_done.click()
+                    
+                    # Handle "Already selected" or other alerts inside selection popup
+                    alert = page.locator("#popupLayerAlert:visible")
+                    if alert.is_visible(timeout=2000):
+                        msg = alert.inner_text()
+                        print(f"Alert during manual addition: {msg}")
+                        alert.locator("button:has-text('확인')").click()
+                        time.sleep(0.5)
+
+                    # Wait for cart count to increase
+                    success = False
+                    for _ in range(15):
+                        time.sleep(0.3)
+                        if get_actual_cart_count() > current_count:
+                            success = True
+                            break
+                    if not success:
+                        print(f"Failed to add manual game (count didn't increase). Cart count: {get_actual_cart_count()}")
+                    else:
+                        print(f"Manual game added successfully. Cart count: {get_actual_cart_count()}")
+                
+                # Confirm popup closed or handle "Already selected" alert
+                # The manual selection popup has an ID #popupSelectNum
+                confirm_btn = page.locator("#popupSelectNum button:has-text('확인'), #popupLayerAlert button:has-text('확인')").first
+                if confirm_btn.is_visible(timeout=2000):
+                    confirm_btn.click()
+                    print("Clicked confirmation in popup.")
+                    time.sleep(0.8)
+                
+                # Wait for popup to be hidden to ensure we are back on the main page
+                try:
+                    page.wait_for_selector("#popupSelectNum", state="hidden", timeout=3000)
+                except:
+                    # If it's still visible, try to click the close (X) button as fallback
+                    close_btn = page.locator("#popupSelectNum .btn-pop-close").first
+                    if close_btn.is_visible(timeout=1000):
+                        close_btn.click()
+                        time.sleep(0.5)
+                
                 time.sleep(0.5)
 
         # Check total games added
-        # (This is a simplified check, ideally we'd look at the UI list)
-        total_games = auto_games + len(manual_numbers)
+        total_games = get_actual_cart_count()
         if total_games == 0:
-            print('No games selected to purchase!')
+            print('No games in cart to purchase!')
             return {"processed_count": 0}
 
         # 4. Final Purchase
         sr.stage("PURCHASE")
+        # Double check cart before purchase
+        final_count = get_actual_cart_count()
+        if final_count != total_games:
+            print(f"Warning: Expected {total_games} games, but found {final_count} in cart.")
+            total_games = final_count
+            
         print(f"Clicking 'Purchase' (구매하기) for {total_games} games...")
         buy_btn = page.locator("#btnBuy, button:has-text('구매하기')").first
         if buy_btn.is_visible(timeout=5000):
@@ -211,20 +288,61 @@ def run(playwright: Playwright, auto_games: int, manual_numbers: list, sr: Scrip
             return {"processed_count": 0, "status": "failed"}
         
         # 5. Confirm purchase popup
+        sr.stage("CONFIRM_PURCHASE")
         print("Confirming final purchase...")
+        
+        # Select specifically the confirmation OK button (class buttonOk)
+        confirm_btn = page.locator("#popupLayerConfirm .buttonOk, #popupLayerConfirm button:has-text('확인')").first
+        
         try:
-            # Mobile uses a custom popup layer with '확인' button
-            confirm_btn = page.locator("#popupLayerConfirm button:has-text('확인'), button:has-text('확인'), a:has-text('확인')").first
-            if confirm_btn.is_visible(timeout=3000):
-                confirm_btn.click()
-                print("Final confirmation clicked.")
-        except Exception:
-            # Fallback for standard alert (though dialog handler should catch it)
-            print("No confirmation popup found, assuming initial dialog handler handled it.")
+            # Explicitly wait for the confirm button to be visible and enabled
+            confirm_btn.wait_for(state="visible", timeout=5000)
+            confirm_btn.click()
+            print("Final confirmation clicked.")
+        except Exception as e:
+            print(f"Confirmation button click failed or not found: {e}")
+            page.screenshot(path=f"lotto645_confirm_failed_{int(time.time())}.png")
+            # If we reached here after clicking Buy, maybe it worked anyway, but we should be careful.
+            # Don't return success yet.
 
-        time.sleep(2)
-        print(f'Lotto 6/45: Purchase process completed.')
-        return {"processed_count": total_games}
+        # 6. Verify success (wait for the result/receipt popup)
+        sr.stage("VERIFY_RESULT")
+        try:
+            # The receipt popup is #report. Wait for it or an alert/confirm to become visible.
+            # Weekly limit popup often uses #popupLayerConfirm or #popupLayerAlert
+            page.wait_for_selector("#report:visible, #popupLayerAlert:visible, #popupLayerConfirm:visible", timeout=15000)
+            
+            # Final result screenshot
+            page.screenshot(path=f"lotto645_result_{int(time.time())}.png")
+            
+            if page.locator("#report").is_visible():
+                print("Purchase success confirmed! (Receipt visible)")
+                return {"processed_count": total_games, "status": "success"}
+            
+            # Check both #popupLayerAlert and #popupLayerConfirm for messages
+            alert_text = ""
+            if page.locator("#popupLayerAlert").is_visible():
+                alert_text = page.locator("#popupLayerAlert").inner_text()
+            elif page.locator("#popupLayerConfirm").is_visible():
+                alert_text = page.locator("#popupLayerConfirm").inner_text()
+
+            if "구매가 완료되었습니다" in alert_text or "구매를 완료하였습니다" in alert_text:
+                print("Purchase success confirmed by alert UI!")
+                return {"processed_count": total_games, "status": "success"}
+            elif "예치금이 부족합니다" in alert_text:
+                print("Purchase failed: Insufficient balance.")
+                return {"processed_count": 0, "status": "failed", "reason": "low_balance"}
+            elif "구매한도" in alert_text:
+                print(f"Purchase failed or partially succeeded: Weekly limit reached. Msg: {alert_text}")
+                return {"processed_count": 0, "status": "failed", "reason": "limit_reached"}
+            else:
+                print(f"Purchase result ambiguous. Alert text: {alert_text}")
+                return {"processed_count": total_games, "status": "ambiguous"}
+                
+        except Exception as e:
+            print(f"Result verification timed out: {e}")
+            page.screenshot(path=f"lotto645_verify_failed_{int(time.time())}.png")
+            return {"processed_count": total_games, "status": "unknown"}
 
     except Exception as e:
         print(f"Flow interrupted: {e}")
@@ -247,7 +365,10 @@ if __name__ == "__main__":
         
         with sync_playwright() as playwright:
             process_result = run(playwright, auto_games, manual_numbers, sr)
-            sr.success(process_result)
+            if process_result.get("status") == "success":
+                sr.success(process_result)
+            else:
+                sr.fail(f"Purchase failed or status unknown: {process_result}")
             
     except Exception as e:
         sr.fail(traceback.format_exc())
